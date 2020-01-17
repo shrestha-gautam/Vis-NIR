@@ -1,0 +1,393 @@
+library(asdreader) #read ASD binary files from ASD field spectrometer
+library(spectacles) #view and analyse the  spectral data files
+library(readxl) #read excel file in the R 
+library(prospectr) #analyse spectral data files in R
+
+#step1 :read asd files from the ASD Field spectrometer
+#get_spectra is a asdreader package function
+get_spectra(choose.files())->g
+sr_no~...~350:2500->spectra(g)
+
+#to save as a SpectraDataFrame
+as(g,"Spectra")->s
+write.csv(s,"nir.csv")
+
+#step2: Splice correction
+splice(s,locations = list(c(1000), c(1830)))
+splice(s)->s_spliced
+plot(s_spliced, xlab = "Wavelength (nm)", ylab = "Reflectance")
+write.csv(s_spliced, "nir_splicecorrected.csv")
+
+read_excel(file.choose())->nir
+
+#step3: Transform the reflectance spectra into absorbance spectra
+350->firstw
+nir[,which(colnames(nir) == firstw):ncol(nir)]->spc
+spc->nir$spc
+# log(1/R) or -log(R)
+-log(nir$spc)->spcl
+sr_no~...~350:2500->spectra(spcl) #don't do this step before any transformations, only before plotting
+plot(spcl)
+write.csv(spcl,"nir_logtransformed.csv")
+
+#step4: Data transformations
+
+#1. First derivative order differentiations
+# First define the differentiation order (e.g. first derivative)
+1->difforder_a
+# USER: Define the window size (e.g. 5 bands)...
+5->swindow_sg
+# USER: then, define the order of the polynomial 
+#  to fit the  points within the window (e.g. 2 )
+2->poly_sg
+
+# Apply the savitzkyGolay function to the spectra
+# Note that the 2 first and last wavelengths are lost in the process
+# (i.e. the vector of wavelengths is shorter now because of the window size
+# of 11 bands. 
+# The number of wavelengths lost at the beginning and 
+# at the of the spectra is (window size  - 1)/2
+spc_sgdiff_1st <- savitzkyGolay(X = nir$spc, m = difforder_a, p = poly_sg, w = swindow_sg)->spc_sgdiff_1st
+write.csv(spc_sgdiff_1st,"savitzky golay plus 1st derivative.csv")
+
+#Multiplicative scatter correction
+require(pls)
+as.matrix(nir[,-1])->nirmsc
+400->firstw
+nirmsc[,which(colnames(nirmsc) == firstw):ncol(nirmsc)]->spc
+spc->nirmsc$spc
+msc(nirmsc$spc)->msc_nir
+write.csv(msc_nir,"log_msc.csv")
+
+#Continuum removal
+require(spectacles)
+sr_no~...~350:2500->spectra(nir)
+apply_spectra(nir, continuum_removal)->nircr
+plot(nircr)
+write.csv(nircr,"log_cr.csv")
+
+#Standard normal variate
+apply_spectra(nir,snv)->snvr
+plot(snvr)
+write.csv(snvr,"log_snv.csv")
+
+#Robust normal variate (rnv)
+apply_spectra(nir, rnv, r = 0.25)->nirrnv
+plot(nirrnv)
+write.csv(nirrnv, "log_rnv.csv")
+
+#step5 :Principal Component Analysis
+#load data file with pre-processed spectra with sample id
+read_excel(file.choose())->raw #require readxl
+prcomp(raw[,-1])->pc
+round(summary(pc)$importance[2,] * 100, 1)->var
+as.data.frame(pc$x[,1:5]) ->scores # get first 5 principal components
+require(ggplot2)
+sp <- ggplot(scores, aes(x = PC1, y =PC2)) +
+  geom_point(size = 3.0, alpha = 0.45, col = "Red") +
+  ggtitle("PCA scores standard normal variate (SNV) preprocessed") +
+  xlab(paste0("PC1 explains ", var[1], "% total variance")) +
+  ylab(paste0("PC2 explains ", var[1], "% total variance")) +
+  theme_bw() +
+  theme(
+    plot.background = element_blank()
+    ,panel.grid.major = element_blank()
+    ,panel.grid.minor = element_blank()
+  )
+sp + theme(plot.title = element_text(hjust = 0.5))->sp
+sp
+
+#step6: Outlier detection (Mahalanobis distance)
+# The aim of outlier detection is to identify atypical spectra (samples) 
+# that are different from the average of the population of samples. Therefore,
+# the distance of each sample in the dataset to the average spectrum 
+# is used to assess whether the sample is an outlier or not.
+
+# In NIR spectroscopy the outlier detection is usually carried out in the 
+# principal component space of the data. Therefore, it is necessary to apply this
+# technique to the spectral data before the distances are computed
+
+library (readxl)
+#Load the pre-processed (data transformed) excel file
+read_excel (file.choose())-> sdata
+# that needs to be retained in the PCs
+404->firstw
+
+#extract in one object only the spectra from the "data" table...
+as.matrix(sdata[,which(colnames(sdata) == firstw):ncol(sdata)])->spc
+
+#remove from "data" spectra...
+sdata[,-c(which(colnames(sdata) == firstw):ncol(sdata)), drop = FALSE]->sdata
+
+#put back the spectra in the "data" object but as a 
+# sub-element of "data"
+spc->sdata$spc
+
+#remove the spc object since it is already a sub-element of "data"
+rm(spc)
+
+#extract from the column names of the spectra sub-element 
+# the vector of wavelengths/wavenumbers
+colnames(sdata$spc)->wavs
+
+# Since the "wavs" vector is a character string vector
+# we will need to transform it to a numeric vector
+# NOTE that the names of the columns of the spectra 
+# must be written only with numbers (otherwise they will not be
+# correctly converted from characters to numbers)
+as.numeric(wavs)->wavs
+
+# USER: indicate the maximum amount of cumulative variance explained
+require (resemble) #for function pcProjection
+0.99->maxexplvar
+
+pcspectra <- pcProjection(Xr = sdata$spc, 
+                          pcSelection = list("cumvar", maxexplvar), 
+                          center = TRUE, scaled = FALSE)
+
+#Calculate the average of the PC scores
+colMeans(pcspectra$scores)->worldspccenter
+
+#Since the result of the "colMeans" function is a vector
+# it is necessary to reformat it to a matrix of 1 row
+t(as.matrix(worldspccenter))->worldspccenter
+
+
+#Calculate the dissimilarity between each sample and the 
+# average spectrum (in the PC space by using the Mahalanobis distance)
+wmahald <- fDiss(Xr =  pcspectra$scores, 
+                 X2 =  worldspccenter, 
+                 method = "mahalanobis", 
+                 center = FALSE, scaled = FALSE)
+
+
+# How to decide whether a sample is an outlier or not...
+# Most methods use "arbitrary" dissimilarity  limits
+# over which a sample is considered as an outlier
+
+# For example, samples with a Mahalanobis dissimilarity larger 
+# than 1 can be considered as outliers
+
+#plot the dissimilarity scores vs the index of the sample 
+plot(wmahald,
+     pch = 16,
+     col = rgb(red = 0, green = 0.4, blue = 0.8, alpha = 0.5),
+     ylab = "Dissimilarity score")
+
+#add a horizontal line to better visualize the samples 
+# with Mahalanobis dissimilarity scores larger than 1
+# (1 is the standard arbitrary threshold)
+abline(h = 1, col = "red")
+
+#identify the samples with Mahalanobis dissimilarity 
+#scores larger than 1
+sink(“outliers_rnv.txt”)#to save output in a file
+wmahald > 1
+sink() # to stop saving process
+
+#Obtain the indices of the outliers
+which(wmahald > 1)->indx_out_m
+
+#how many outliers?
+length(indx_out_m)
+
+#plot the first two PCs along the identified outliers
+plot(x = pcspectra$scores[,1],
+     y = pcspectra$scores[,2],
+     xlab = "PC 1",
+     ylab = "PC 2",
+     pch = 16,
+     col = rgb(red = 0.5, green = 0.5, blue = 0.5, alpha = 0.5),
+     main = "Mahalanobis outliers")
+grid()
+points(x = pcspectra$scores[indx_out_m,1],
+       y = pcspectra$scores[indx_out_m,2],
+       pch = 16,
+       col = "red")
+
+#step7: separate data into calibration and validation sets
+library(readxl)
+read_excel(file.choose())->sdata
+library(spectacles)
+sr_no~...~404:2500->spectra(sdata)
+#put the number of samples (71 in this case) you want in the calibration set. Individual sample ID will be the results. Remaining sample can go for the validation set
+kenstone(sdata,71)
+
+#step8: Random forest model development
+library(readxl)
+library(randomForest)
+library(caret)
+#load calibration data set with reference parameter (e.g. organic Cd fraction) and transformed spectra (e.g. RNV)
+read_excel(file.choose())->cal
+#need to convert excel file as matrix before any calculation to start
+as.matrix(cal)->datas
+
+set.seed(67523)
+
+msummary<-NULL
+#measured value of calibration set is stored in trainY
+trainY <- datas[,1]
+#spectral data is stored in x 
+x = datas[,-1]
+#To run "randomForest' function, randomForest package required
+rf.m <- randomForest(data = datas, x = datas[,-1], y = datas[,1],
+                     ntree = 500, importance = TRUE, na.action = na.omit)
+predicted<-predict(rf.m )
+measured<-trainY
+
+#to run 'postResample' function, caret package required
+training.parameters <- round(postResample(predicted,measured),3)
+RSQ <- training.parameters[2]
+RMSE <- training.parameters[1]
+
+#load validation data set with reference parameter (e.g. total Cd) and transformed spectra (e.g. RNV)
+val<-read_excel(file.choose())
+#need to convert excel file as matrix before any calculation to start
+as.matrix(val)->valid
+predicted.test <- predict(rf.m,valid[,-1])
+measured.test <- valid[,1]
+
+testing.parameters <- round(postResample(predicted.test,measured.test),3)
+
+RSQval <- testing.parameters[2]
+RMSEval <- testing.parameters[1]
+chillR::RPD (predicted.test,measured.test)->RPDval
+
+model.summary <- c(training.parameters,testing.parameters)
+msummary <- rbind(msummary,model.summary)
+
+pm <- as.data.frame(cbind(measured,predicted))
+
+# Create scatter plot for the predicted versus the measured
+p <- ggplot(pm, aes(x = measured,y = predicted)) + 
+  geom_point(col = "black",size = 2,alpha = 0.3) +
+  ggtitle(paste0("Calibration for soil total Cd")) + 
+  xlab("Measured Cd") + 
+  ylab("Predicted Cd")
+
+p <- p + stat_smooth(method = lm, se = FALSE, color = 'black',alpha = 0.15)
+p <- p + theme(plot.title = element_text(lineheight = 3, face = "bold", color = "black", size = 20))
+p <- p + theme(text = element_text(size = 20)) 
+
+# this will change all text size
+
+p <- p + annotate('text', label = paste('R^2 == ',RSQ), parse = TRUE,Inf, 
+-Inf,hjust = 2.5, vjust = -7.8) + annotate('text', label = paste('RMSE == ',RMSE),parse = TRUE,Inf, -Inf,hjust = 1.8, vjust = -7.8)
+
+# Centre title
+p <- p + theme(plot.title = element_text(hjust  = 0.5))
+p <- p + xlim(range(pm)) + ylim(range(pm))
+
+p
+# Validation data
+
+pmp <- as.data.frame(cbind(measured.test,predicted.test))
+
+
+p2 <- ggplot(pmp, aes(x = measured.test,y = predicted.test)) + 
+    geom_point(col = "brown",size = 2,alpha = 0.3) + 
+    ggtitle(paste0("Validation for organic Cd fraction")) + 
+    xlab("Measured organic Cd fraction") + 
+    ylab("Predicted organic Cd fraction")  
+
+p2 <- p2 + stat_smooth(method = lm, se = FALSE, color = 'brown',alpha = 0.15)
+p2 <- p2 + theme(plot.title = element_text(lineheight = 3, face = "bold",
+                                           color = "black", size = 20))
+p2
+# this will change all text size 
+
+p2 <- p2 + theme(text = element_text(size = 20)) 
+p2 <- p2 + annotate('text', label = paste('R^2 == ',RSQP),
+                    parse = TRUE,Inf, -Inf,hjust = 2.5, vjust = -7.8) + 
+  			annotate('text', label = paste('RMSEP == ',RMSEP), 
+          		 parse = TRUE,Inf, -Inf,hjust = 1.8, vjust = -7.8)
+
+# Centre title
+p2 <- p2 + theme(plot.title = element_text(hjust  = 0.5))
+p2 <- p2 + xlim(range(pmp)) + ylim(range(pmp))
+p2
+
+#step9: Partial Least Square (PLS) model development
+library(readxl)
+library(caret)
+library(pls)
+library(doParallel)
+registerDoParallel()
+getDoParWorkers()
+g<-read_excel(file.choose())
+as.matrix(g)->cal
+set.seed(100)
+trainY <- cal[,1]
+trainX <- cal[, -1]
+colnames(cal) <- c("trainY", colnames(trainX))
+cal[,"trainY"] <- log(cal[,"trainY"])
+indx <- createFolds(cal[,"trainY"], returnTrain = TRUE)
+ctrl <- trainControl(method = "cv", index = indx)
+rf.m <- train(trainY~., method = "pls", data = cal, trControl = ctrl,tuneGrid = expand.grid(ncomp = 1:10), metric = "RMSE",preProc = c("center", "scale"))
+predicted <- exp(predict(rf.m,rf.m$trainingData))
+measured<-trainY
+y <- exp(cal[,"trainY"])
+
+#computes RMSE and R-squared values for the calibration set
+training.parameters <- round(postResample(predicted,y),3)
+RSQ <- training.parameters[2]
+RMSE <- training.parameters[1]
+
+#validation of model 
+read_excel(file.choose())->vali
+as.matrix(vali)->val
+predicted.test <- exp(predict(rf.m,val[,-1]))
+measured.test <- val[,1]
+
+#Get PCs used
+PCs <- rf.m$finalModel$ncomp
+
+#computes RMSE and R-squared values for the validation set
+testing.parameters <- round(postResample(predicted.test,measured.test),2)
+RSQval <- testing.parameters[2]
+RMSEval <- testing.parameters[1]
+chillR::RPD(predicted.test, measured.test)->RPDval
+
+msummary<-NULL
+model.summary <- c(PCs,training.parameters,testing.parameters)
+msummary <- rbind(msummary,model.summary)
+
+# Create scatter plot for the predicted versus the measured calibration
+pm <- as.data.frame(cbind(measured,predicted))
+p <- ggplot(pm, aes(x = measured,y = predicted)) + 
+    geom_point(col = "black",size = 2,alpha = 0.3) + 
+    ggtitle(paste0("PLS model Calibration for soil total Cd")) + 
+    xlab("Measured soil total Cd") + 
+    ylab("Predicted soil total Cd")
+
+p <- p + stat_smooth(method = lm, se = FALSE, color = 'black',alpha = 0.15)
+p <- p + theme(plot.title = element_text(lineheight = 3, face = "bold", color = "black", size = 20))
+p <- p + theme(text = element_text(size = 20)) 
+
+# this will change all text size
+p <- p + annotate('text', label = paste('R^2 == ',RSQ), parse = TRUE,Inf, -Inf,hjust = 2.5, vjust = -7.8) + annotate('text', label = paste('RMSE == ',RMSE),parse = TRUE,Inf, -Inf,hjust = 1.8, vjust = -7.8)
+
+# Centre title
+p <- p + theme(plot.title = element_text(hjust  = 0.5))
+p <- p + xlim(range(pm)) + ylim(range(pm))
+p
+
+# Create scatter plot for the predicted versus the measured Validation data
+pmp <- as.data.frame(cbind(measured.test,predicted.test))
+p2 <- ggplot(pmp, aes(x = measured.test,y = predicted.test)) + geom_point(col = "brown",size = 2,alpha = 0.3) + ggtitle(paste0("PLS model Validation for soil pH")) + xlab("Measured soil pH") + ylab("Predicted soil pH")  
+p2 <- p2 + stat_smooth(method = lm, se = FALSE, color = 'brown',alpha = 0.15)
+p2 <- p2 + theme(plot.title = element_text(lineheight = 3, face = "bold",color = "black", size = 20))
+p2
+
+# this will change all text size 
+p2 <- p2 + theme(text = element_text(size = 20)) 
+p2 <- p2 + annotate('text', label = paste('R^2 == ',RSQP),parse = TRUE,Inf, -Inf,hjust = 2.5, vjust = -7.8) + annotate('text', label = paste('RMSEP == ',RMSEP),parse = TRUE,Inf, -Inf,hjust = 1.8, vjust = -7.8)
+
+# Centre title
+p2 <- p2 + theme(plot.title = element_text(hjust  = 0.5))
+p2 <- p2 + xlim(range(pmp)) + ylim(range(pmp))
+
+# this will change all text size
+p2 <- p2 + annotate('text', label = paste('R^2 == ',RSP), parse = TRUE,Inf,-Inf,hjust = 2.5, vjust = -7.8) + annotate('text', label = paste('RMSE == ',RMSEP), parse = TRUE,Inf, -Inf,hjust = 1.8, vjust = -7.8)
+p2
+
