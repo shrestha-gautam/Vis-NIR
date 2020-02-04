@@ -205,7 +205,32 @@ points(x = pcspectra$scores[indx_out_m,1],
        pch = 16,
        col = "red")
 
-#step7: separate data into calibration and validation sets
+#step 7: Correlation matrix plot
+library (corrplot)
+library (readxl)
+read_excel(file.choose())->cord
+cor(cord)->d
+corrplot(d, type = "lower", order = "hclust", tl.col = "black", tl.srt = 0)
+corrplot.mixed(d, lower.col = "black", munber.cex = 0.7)
+
+#step 8: Drawing graph of correlation coefficient of soil cadmium content and spectra relation 
+require(reshape2)
+#this excel file contains both chemical and spectral data
+read_excel(file.choose())->nirspectra
+#we separate spectral data
+x<-nirspectra[,17:3591]
+#cadmium
+y<-nirspectra[,3]
+
+corr<-cor(x,y,method="pearson")
+write.csv(corr,"1st der correlation_cadmium spectra.csv")
+corr_melt<-melt(corr)
+e<-ggplot(corr_melt, aes(Var1,value))+geom_line(color="#000066",size=1)+labs(x="Wavenumber cm^-1", y="Pearson-coeff(Cd)")
+e+theme(panel.background = element_blank(),axis.line = element_line(colour = "black"))+theme_minimal()
+
+Based on "step 8" one can select the wavebands for more accurate prediction model. Also refer to Wang, C., Li, W., Guo, M., & Ji, J. (2017). Ecological risk assessment on heavy metals in soils: Use of soil diffuse reflectance mid-infrared Fourier-transform spectroscopy. Scientific reports, 7, 40709.
+
+#step9: separate data into calibration and validation sets
 library(readxl)
 read_excel(file.choose())->sdata
 library(spectacles)
@@ -213,7 +238,7 @@ sr_no~...~404:2500->spectra(sdata)
 #put the number of samples (71 in this case) you want in the calibration set. Individual sample ID will be the results. Remaining sample can go for the validation set
 kenstone(sdata,71)
 
-#step8: Random forest model development
+#step10: Random forest model development
 library(readxl)
 library(randomForest)
 library(caret)
@@ -307,7 +332,7 @@ p2 <- p2 + theme(plot.title = element_text(hjust  = 0.5))
 p2 <- p2 + xlim(range(pmp)) + ylim(range(pmp))
 p2
 
-#step9: Partial Least Square (PLS) model development
+#step11: Partial Least Square (PLS) model development
 library(readxl)
 library(caret)
 library(pls)
